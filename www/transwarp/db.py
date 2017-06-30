@@ -10,6 +10,25 @@ import threading
 import logging
 import MySQLdb
 
+# Dict object :
+class Dict(dict):
+    '''
+    Simple dict but support access as x.y style.
+    '''
+    def __init__(self, names=(), values=(), **kw):    
+        super(Dict, self).__init__(**kw)
+        for k, v in zip(names, values):
+            self[k] = v
+
+    def __getattr__(self, key):
+        try:
+            return self[key]
+        except KeyError:
+            raise AttributeError(r"'Dict' object has no attribute '%s'" % key)
+
+    def __setattr__(self, key, value):
+        self[key] = value
+
 def next_id(t=None):
     '''
     Return next id as 50-char string.
@@ -152,13 +171,86 @@ def with_connection(func):
             return func(*args, **kw)
     return wrapper
 
+def _select(sql, first, *args):
+    'execute select SQL and return unique result or list result.'
+    global _db_ctx
+    cursor = None
+    sql = sql.replace('?', '%s')
+    logging.info('SQL: %s, ARGS: %s' % (sql, args))
+    try:
+        cursor = _db_ctx.connection.cursor()
+        cursor.execute(sql, args)
+        if cursor.description:
+            names = [x[0] for x in cursor.description]
+        if first:
+            values = cursor.fetchone()
+            if not values:
+                return None
+            return Dict(names, values)
+        return [Dict(names, x) for x in cursor.fetchall()]
+    finally:
+        if cursor:
+            cursor.close()
+
+@with_connection
+def select_one(sql, *args):
+    '''
+    Execute select SQL and expected one result. 
+    If no result found, return None.
+    If multiple results found, the first one returned.
+    '''
+    return _select(sql, True, *args)
+
+@with_connection
+def select_int(sql, *args):
+    '''
+    Execute select SQL and expected one int and only one int result. 
+    '''
+    d = _select(sql, True, *args)
+    if len(d)!=1:
+        raise MultiColumnsError('Expect only one column.')
+    return d.values()[0]
+
 @with_connection
 def select(sql, *args):
-    pass
+    '''
+    Execute select SQL and return list or empty list if no result.
+    '''
+    return _select(sql, False, *args)
+
+@with_connection
+def _update(sql, *args):
+    global _db_ctx
+    cursor = None
+    sql = sql.replace('?', '%s')
+    logging.info('SQL: %s, ARGS: %s' % (sql, args))
+    try:
+        cursor = _db_ctx.connection.cursor()
+        cursor.execute(sql, args)
+        r = cursor.rowcount
+        if _db_ctx.transactions==0:
+            # no transaction enviroment:
+            logging.info('auto commit')
+            _db_ctx.connection.commit()
+        return r
+    finally:
+        if cursor:
+            cursor.close()
 
 @with_connection
 def update(sql, *args):
-    pass
+    '''
+    Execute update SQL.
+    '''
+    return _update(sql, *args)
+
+def insert(table, **kw):
+    '''
+    Execute insert SQL.
+    '''
+    cols, args = zip(*kw.iteritems())
+    sql = 'insert into `%s` (%s) values (%s)' % (table, ','.join(['`%s`' % col for col in cols]), ','.join(['?' for i in range(len(cols))]))
+    return _update(sql, *args)
 
 if __name__=='__main__':
     logging.basicConfig(level=logging.DEBUG)
